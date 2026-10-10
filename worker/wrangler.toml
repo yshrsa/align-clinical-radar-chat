@@ -15,7 +15,7 @@ binding = "AI"
 [[d1_databases]]
 binding = "CHAT_DB"
 database_name = "align-clinical-radar-chat-history"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "aabbf841-9b59-4197-b4c8-2cb090b02a74"
 migrations_dir = "../migrations"
 
 [durable_objects]
