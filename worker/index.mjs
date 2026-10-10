@@ -1,0 +1,275 @@
+import { MODEL, RESERVE_NEURONS_PER_CHAT, RESERVE_NEURONS_PER_SUMMARY, allowedOrigin, buildGroundedPrompt, buildSummaryPrompt, corsHeaders, gatewayAuthorized, jsonResponse, mapNotionPage, ownerId, scoreArticle, searchTerms } from './lib.mjs';
+
+const NOTION_QUERY_URL = databaseId => `https://api.notion.com/v1/databases/${databaseId}/query`;
+
+async function notionRequest(env, body) {
+  const response = await fetch(NOTION_QUERY_URL(env.NOTION_DATABASE_ID), {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${env.NOTION_API_KEY}`,
+      'notion-version': env.NOTION_VERSION || '2022-06-28',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw new Error(`Notion query failed: ${response.status}`);
+  return response.json();
+}
+
+async function publicFeed(env) {
+  const response = await fetch(env.PUBLIC_FEED_URL, { cf: { cacheTtl: 300, cacheEverything: true } });
+  if (!response.ok) throw new Error(`Public evidence feed failed: ${response.status}`);
+  const payload = await response.json();
+  return payload.items || [];
+}
+
+async function searchCorpus(env, query, limit = 8) {
+  const terms = searchTerms(query);
+  let articles;
+  if (env.NOTION_API_KEY && env.NOTION_DATABASE_ID) {
+    const filters = terms.slice(0, 3).flatMap(term => [
+      { property: 'Title', title: { contains: term } },
+      { property: 'Summary JA', rich_text: { contains: term } },
+      { property: 'Assets', multi_select: { contains: term } }
+    ]);
+    try {
+      const payload = await notionRequest(env, { filter: filters.length ? { or: filters } : undefined, page_size: 50 });
+      articles = (payload.results || []).map(mapNotionPage);
+    } catch (error) {
+      console.warn('Notion unavailable; using validated public feed', error);
+      articles = await publicFeed(env);
+    }
+  } else {
+    articles = await publicFeed(env);
+  }
+  return articles
+    .map(article => ({ article, score: scoreArticle(article, terms) }))
+    .filter(item => !terms.length || item.score >= 1)
+    .sort((a, b) => b.score - a.score || String(b.article.publication_date).localeCompare(String(a.article.publication_date)))
+    .slice(0, limit).map(item => item.article);
+}
+
+async function reserveBudget(env, kind) {
+  const date = new Date().toISOString().slice(0, 10);
+  const now = new Date().toISOString();
+  const isSummary = kind === 'summary';
+  const amount = isSummary ? RESERVE_NEURONS_PER_SUMMARY : RESERVE_NEURONS_PER_CHAT;
+  const limit = Number(isSummary ? (env.SUMMARY_DAILY_NEURON_BUDGET || 4000) : (env.CHAT_DAILY_NEURON_BUDGET || 6000));
+  const column = isSummary ? 'summary_reserved_neurons' : 'chat_reserved_neurons';
+  const calls = isSummary ? 'summary_calls' : 'chat_calls';
+  await env.CHAT_DB.prepare('INSERT OR IGNORE INTO ai_budget(date_utc,summary_reserved_neurons,chat_reserved_neurons,summary_calls,chat_calls,updated_at) VALUES(?,0,0,0,0,?)').bind(date, now).run();
+  const result = await env.CHAT_DB.prepare(
+    `UPDATE ai_budget SET ${column}=${column}+?, ${calls}=${calls}+1, updated_at=? ` +
+    `WHERE date_utc=? AND ${column}+?<=? AND summary_reserved_neurons+chat_reserved_neurons+?<=10000`
+  ).bind(amount, now, date, amount, limit, amount).run();
+  return Number(result.meta?.changes || 0) === 1;
+}
+
+async function saveMessage(env, owner, threadId, role, content, citations = []) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.CHAT_DB.prepare(
+    'INSERT INTO messages(id,thread_id,owner_id,role,content,citations_json,created_at) VALUES(?,?,?,?,?,?,?)'
+  ).bind(id, threadId, owner, role, content, JSON.stringify(citations), now).run();
+  await env.CHAT_DB.prepare('UPDATE threads SET updated_at=? WHERE id=? AND owner_id=?').bind(now, threadId, owner).run();
+  return id;
+}
+
+async function ensureThread(env, owner, threadId, question) {
+  const id = threadId || crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.CHAT_DB.prepare(
+    'INSERT OR IGNORE INTO threads(id,owner_id,title,created_at,updated_at) VALUES(?,?,?,?,?)'
+  ).bind(id, owner, String(question).slice(0, 60), now, now).run();
+  const row = await env.CHAT_DB.prepare('SELECT id FROM threads WHERE id=? AND owner_id=?').bind(id, owner).first();
+  if (!row) throw new Error('Thread does not belong to this user');
+  return id;
+}
+
+function clientKey(request) {
+  return ownerId(request) || request.headers.get('CF-Connecting-IP') || 'unknown-client';
+}
+
+async function enforceRateLimit(durableNamespace, binding, request, routeName, maximum) {
+  const key = `${clientKey(request)}:${routeName}`;
+  if (durableNamespace) {
+    const id = durableNamespace.idFromName(key);
+    const stub = durableNamespace.get(id);
+    const durableResponse = await stub.fetch('https://rate-limiter/check', {
+      method: 'POST',
+      body: JSON.stringify({ maximum, windowMs: 60 * 1000 })
+    });
+    const result = await durableResponse.json();
+    if (!result.success) {
+      const response = jsonResponse({ error: '利用回数が一時的な上限に達しました。1分後に再試行してください。' }, 429, request);
+      response.headers.set('Retry-After', String(result.retryAfter || 60));
+      return response;
+    }
+  }
+  if (binding) {
+    const { success } = await binding.limit({ key });
+    if (!success) {
+      const response = jsonResponse({ error: '利用回数が一時的な上限に達しました。1分後に再試行してください。' }, 429, request);
+      response.headers.set('Retry-After', '60');
+      return response;
+    }
+  }
+  return null;
+}
+
+async function route(request, env) {
+  const url = new URL(request.url);
+  if (request.method === 'OPTIONS') {
+    if (url.pathname === '/health') {
+      return new Response(null, { status: 204, headers: {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'GET,OPTIONS',
+        'access-control-max-age': '86400'
+      }});
+    }
+    if (!allowedOrigin(request)) return new Response(null, { status: 403 });
+    return new Response(null, { status: 204, headers: corsHeaders(request) });
+  }
+  if (url.pathname === '/health') return jsonResponse({
+    status: 'ok', model: MODEL, paid_fallback: false,
+    ingest_configured: Boolean(env.INGEST_SECRET), access_gateway: Boolean(env.PAGE_GATEWAY_SECRET),
+    rate_limited: Boolean(env.API_RATE_LIMITER || env.CHAT_RATE_LIMITER),
+    corpus_source: env.NOTION_API_KEY && env.NOTION_DATABASE_ID ? 'notion' : 'validated-public-feed'
+  }, 200, request);
+  const browserApi = url.pathname === '/api/chat' || url.pathname === '/api/search' || url.pathname === '/api/threads' || url.pathname.startsWith('/api/threads/');
+  if (browserApi && !gatewayAuthorized(request, env)) {
+    return jsonResponse({ error: 'Cloudflare Access authentication is required' }, 401, request);
+  }
+  if (url.pathname === '/api/search' && request.method === 'POST') {
+    const limited = await enforceRateLimit(env.API_RATE_LIMITER, env.SEARCH_RATE_LIMITER, request, 'search', 30);
+    if (limited) return limited;
+    const { query, limit } = await request.json();
+    const articles = await searchCorpus(env, query, Math.min(Number(limit) || 10, 20));
+    return jsonResponse({ query, count: articles.length, articles }, 200, request);
+  }
+  if (url.pathname === '/api/admin/summarize' && request.method === 'POST') {
+    const expected = String(env.INGEST_SECRET || '');
+    const supplied = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+    if (!expected || supplied !== expected) return jsonResponse({ error: 'Unauthorized' }, 401, request);
+    const requestKey = String(request.headers.get('idempotency-key') || '').slice(0, 200);
+    if (!requestKey) return jsonResponse({ error: 'Idempotency-Key is required' }, 400, request);
+    const existing = await env.CHAT_DB.prepare('SELECT state,response_json FROM ai_requests WHERE request_key=?').bind(requestKey).first();
+    if (existing?.state === 'completed' && existing.response_json) {
+      return jsonResponse(JSON.parse(existing.response_json), 200, request);
+    }
+    if (existing?.state === 'processing') return jsonResponse({ error: 'Request is already processing' }, 409, request);
+    if (existing?.state === 'failed') return jsonResponse({ error: 'Request failed; it will be retried in the next UTC day' }, 409, request);
+    const now = new Date().toISOString();
+    await env.CHAT_DB.prepare('INSERT INTO ai_requests(request_key,kind,date_utc,state,created_at,updated_at) VALUES(?,?,?,?,?,?)')
+      .bind(requestKey, 'summary', now.slice(0, 10), 'processing', now, now).run();
+    if (!(await reserveBudget(env, 'summary'))) {
+      await env.CHAT_DB.prepare("UPDATE ai_requests SET state='failed',updated_at=? WHERE request_key=?").bind(new Date().toISOString(), requestKey).run();
+      return jsonResponse({ error: 'Daily free summary budget exhausted', budget_exhausted: true }, 429, request);
+    }
+    const article = await request.json();
+    try {
+      const result = await env.AI.run(MODEL, {
+        messages: [
+          { role: 'system', content: 'Return valid JSON only. Do not use markdown.' },
+          { role: 'user', content: buildSummaryPrompt(article) }
+        ],
+        response_format: { type: 'json_object' },
+        reasoning_effort: 'low',
+        temperature: 0.1,
+        max_completion_tokens: 1800
+      });
+      const payload = {
+        response: result.response || result.choices?.[0]?.message?.content || '',
+        usage: result.usage || null,
+        model: MODEL
+      };
+      if (!payload.response) throw new Error('Qwen returned no final response after reasoning');
+      await env.CHAT_DB.prepare("UPDATE ai_requests SET state='completed',response_json=?,updated_at=? WHERE request_key=?")
+        .bind(JSON.stringify(payload), new Date().toISOString(), requestKey).run();
+      return jsonResponse(payload, 200, request);
+    } catch (error) {
+      await env.CHAT_DB.prepare("UPDATE ai_requests SET state='failed',updated_at=? WHERE request_key=?")
+        .bind(new Date().toISOString(), requestKey).run();
+      throw error;
+    }
+  }
+  if (url.pathname === '/api/threads' && request.method === 'GET') {
+    const limited = await enforceRateLimit(env.API_RATE_LIMITER, env.HISTORY_RATE_LIMITER, request, 'history', 60);
+    if (limited) return limited;
+    const owner = ownerId(request);
+    const result = await env.CHAT_DB.prepare('SELECT id,title,created_at,updated_at FROM threads WHERE owner_id=? ORDER BY updated_at DESC LIMIT 50').bind(owner).all();
+    return jsonResponse({ threads: result.results || [] }, 200, request);
+  }
+  if (url.pathname.startsWith('/api/threads/') && request.method === 'GET') {
+    const limited = await enforceRateLimit(env.API_RATE_LIMITER, env.HISTORY_RATE_LIMITER, request, 'history', 60);
+    if (limited) return limited;
+    const owner = ownerId(request);
+    const threadId = url.pathname.split('/').pop();
+    const result = await env.CHAT_DB.prepare('SELECT id,role,content,citations_json,created_at FROM messages WHERE thread_id=? AND owner_id=? ORDER BY created_at').bind(threadId, owner).all();
+    return jsonResponse({ messages: (result.results || []).map(row => ({ ...row, citations: JSON.parse(row.citations_json || '[]') })) }, 200, request);
+  }
+  if (url.pathname === '/api/chat' && request.method === 'POST') {
+    const limited = await enforceRateLimit(env.API_RATE_LIMITER, env.CHAT_RATE_LIMITER, request, 'chat', 10);
+    if (limited) return limited;
+    const body = await request.json();
+    const question = String(body.question || '').trim();
+    if (!question || question.length > 2000) return jsonResponse({ error: '質問は1〜2000文字で入力してください。' }, 400, request);
+    const owner = ownerId(request);
+    const articles = await searchCorpus(env, question, 8);
+    const threadId = await ensureThread(env, owner, body.thread_id, question);
+    await saveMessage(env, owner, threadId, 'user', question);
+    if (!articles.length) {
+      const answer = '関連する文献を確認できませんでした。製品名、治療工程、評価指標、試験名などを加えて検索してください。';
+      await saveMessage(env, owner, threadId, 'assistant', answer);
+      return jsonResponse({ thread_id: threadId, answer, citations: [], mode: 'search-only' }, 200, request);
+    }
+    if (!(await reserveBudget(env, 'chat'))) {
+      const answer = '本日の無料AI枠に達したため、文献検索結果のみを表示します。生成回答はUTC日付の更新後に再開します。';
+      await saveMessage(env, owner, threadId, 'assistant', answer, articles);
+      return jsonResponse({ thread_id: threadId, answer, citations: articles, mode: 'search-only', budget_exhausted: true }, 200, request);
+    }
+    const result = await env.AI.run(MODEL, {
+      messages: [
+        { role: 'system', content: '根拠にない情報を作らず、引用番号を付けて回答してください。' },
+        { role: 'user', content: buildGroundedPrompt(question, articles) }
+      ],
+      reasoning_effort: 'low',
+      temperature: 0.1,
+      max_completion_tokens: 1400
+    });
+    const answer = String(result.response || result.choices?.[0]?.message?.content || '').trim() || '生成回答を取得できませんでした。';
+    await saveMessage(env, owner, threadId, 'assistant', answer, articles);
+    return jsonResponse({ thread_id: threadId, answer, citations: articles, mode: 'qwen' }, 200, request);
+  }
+  return jsonResponse({ error: 'Not found' }, 404, request);
+}
+
+export default {
+  async fetch(request, env) {
+    try {
+      return await route(request, env);
+    } catch (error) {
+      console.error(error);
+      return jsonResponse({ error: 'Internal server error', detail: env.ENVIRONMENT === 'development' ? String(error) : undefined }, 500, request);
+    }
+  }
+};
+
+export class ApiRateLimiter {
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    const { maximum, windowMs } = await request.json();
+    const now = Date.now();
+    const result = await this.state.storage.transaction(async txn => {
+      let bucket = await txn.get('bucket');
+      if (!bucket || now >= bucket.resetAt) bucket = { count: 0, resetAt: now + windowMs };
+      bucket.count += 1;
+      await txn.put('bucket', bucket);
+      return { success: bucket.count <= maximum, retryAfter: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)) };
+    });
+    return Response.json(result);
+  }
+}

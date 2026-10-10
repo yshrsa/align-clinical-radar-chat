@@ -1,0 +1,6 @@
+name = "align-clinical-radar-chat"
+pages_build_output_dir = "./frontend"
+compatibility_date = "2026-08-31"
+
+[vars]
+ALIGN_RADAR_WORKER_BASE = "https://align-clinical-radar-api.sh-radar.workers.dev"

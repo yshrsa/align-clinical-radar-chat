@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Align Clinical Operations Radar — Chat</title>
+  <style>
+    :root{--bg:#08111f;--side:#0c1727;--panel:#111f33;--line:#263752;--text:#eef5ff;--muted:#9bb1cf;--accent:#63b3ff;--good:#42d6a4}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,"Noto Sans JP",system-ui,sans-serif;height:100vh;display:grid;grid-template-columns:270px 1fr}
+    aside{background:var(--side);border-right:1px solid var(--line);padding:18px;overflow:auto}.brand{font-weight:800;margin-bottom:20px}.brand span{color:var(--accent)}button,input{font:inherit}.new{width:100%;padding:11px;border:0;border-radius:10px;background:var(--accent);color:#04101d;font-weight:800;cursor:pointer}.thread{display:block;width:100%;text-align:left;background:transparent;color:var(--muted);border:0;border-bottom:1px solid #18273b;padding:12px 4px;cursor:pointer}.thread:hover{color:var(--text)}
+    main{display:flex;flex-direction:column;min-width:0}.top{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:18px}.topnav{display:flex;align-items:center;gap:8px}.topnav a{color:var(--muted);text-decoration:none;border:1px solid transparent;border-radius:999px;padding:6px 10px;font-size:.8rem}.topnav a:hover,.topnav a.active{color:var(--text);border-color:var(--line);background:var(--panel)}.status{color:var(--good);font-size:.8rem}.chat{flex:1;overflow:auto;padding:28px max(24px,calc((100% - 900px)/2));display:flex;flex-direction:column;gap:18px}.msg{max-width:82%;border:1px solid var(--line);border-radius:16px;padding:15px 18px;line-height:1.7;white-space:pre-wrap}.user{align-self:flex-end;background:#15243a}.assistant{align-self:flex-start;background:var(--panel)}.citations{margin-top:12px;border-top:1px solid var(--line);padding-top:10px;font-size:.78rem;color:var(--muted)}.citations a{color:var(--accent)}
+    form{padding:18px max(24px,calc((100% - 900px)/2));border-top:1px solid var(--line);display:flex;gap:10px}input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:12px;color:var(--text);padding:14px}form button{border:0;border-radius:12px;background:var(--accent);font-weight:800;padding:0 22px;cursor:pointer}.hint{text-align:center;color:var(--muted);font-size:.75rem;padding:0 20px 12px}
+    @media(max-width:760px){body{grid-template-columns:1fr}aside{display:none}.msg{max-width:94%}}
+  </style>
+</head>
+<body>
+<aside><div class="brand"><span>Align</span> Clinical Radar</div><button class="new" id="new">＋ 新規チャット</button><div id="threads"></div></aside>
+<main><div class="top"><strong>Clinical Operations Chat</strong><div class="topnav"><a href="https://yshrsa.github.io/align-clinical-radar-news/">News</a><a class="active" aria-current="page" href="./">AI Chat</a><span class="status" id="status">接続確認中</span></div></div><div class="chat" id="chat"><div class="msg assistant">クリアアライナー文献コーパスに基づいて回答します。製品名、治療工程、評価指標、試験名などを含めて質問してください。</div></div><form id="form"><input id="question" maxlength="2000" placeholder="例：Invisalignのplanned-vs-achieved評価で主要な結果は？" autocomplete="off"><button>送信</button></form><div class="hint">Qwen 3.8 27B / 無料枠到達時は検索専用に安全縮退 / 回答は医療助言ではありません</div></main>
+<script>
+const API='';let threadId=null;
+const headers={'content-type':'application/json'};const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const safeHref=value=>{try{const url=new URL(String(value||''));return url.protocol==='https:'?url.href:'#'}catch{return '#'}};
+function add(role,text,citations=[]){const el=document.createElement('div');el.className=`msg ${role}`;el.textContent=text;if(citations.length){const c=document.createElement('div');c.className='citations';c.innerHTML='<b>参照文献</b><br>'+citations.map((x,i)=>`[${i+1}] <a href="${esc(safeHref(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title)}</a> (PMID ${esc(x.pmid)})`).join('<br>');el.appendChild(c)}document.querySelector('#chat').appendChild(el);el.scrollIntoView({behavior:'smooth'})}
+async function loadThreads(){try{const r=await fetch(`${API}/api/threads`,{headers});const d=await r.json();document.querySelector('#threads').innerHTML=(d.threads||[]).map(t=>`<button class="thread" data-id="${esc(t.id)}">${esc(t.title)}</button>`).join('');document.querySelectorAll('.thread').forEach(b=>b.onclick=()=>loadThread(b.dataset.id))}catch{}}
+async function loadThread(id){threadId=id;const r=await fetch(`${API}/api/threads/${id}`,{headers});const d=await r.json();document.querySelector('#chat').innerHTML='';(d.messages||[]).forEach(m=>add(m.role,m.content,m.citations||[]))}
+document.querySelector('#new').onclick=()=>{threadId=null;document.querySelector('#chat').innerHTML='';add('assistant','新しい質問をどうぞ。')};
+document.querySelector('#form').onsubmit=async e=>{e.preventDefault();const input=document.querySelector('#question');const q=input.value.trim();if(!q)return;add('user',q);input.value='';input.disabled=true;try{const r=await fetch(`${API}/api/chat`,{method:'POST',headers,body:JSON.stringify({question:q,thread_id:threadId})});const d=await r.json();if(!r.ok)throw Error(d.error||r.status);threadId=d.thread_id;add('assistant',d.answer,d.citations||[]);loadThreads()}catch(err){add('assistant',`エラー: ${err.message}`)}finally{input.disabled=false;input.focus()}};
+fetch(`${API}/api/health`).then(r=>r.json()).then(d=>document.querySelector('#status').textContent=d.status==='ok'?'Qwen Cloud 接続済み':'接続エラー').catch(()=>document.querySelector('#status').textContent='API未接続');loadThreads();
+</script>
+</body></html>

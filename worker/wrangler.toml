@@ -1,0 +1,49 @@
+name = "align-clinical-radar-api"
+main = "index.mjs"
+compatibility_date = "2026-08-31"
+
+[vars]
+ENVIRONMENT = "production"
+NOTION_VERSION = "2022-06-28"
+CHAT_DAILY_NEURON_BUDGET = "6000"
+SUMMARY_DAILY_NEURON_BUDGET = "4000"
+PUBLIC_FEED_URL = "https://yshrsa.github.io/align-clinical-radar-news/data/news-latest.json"
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "CHAT_DB"
+database_name = "align-clinical-radar-chat-history"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../migrations"
+
+[durable_objects]
+bindings = [
+  { name = "API_RATE_LIMITER", class_name = "ApiRateLimiter" }
+]
+
+[[migrations]]
+tag = "v1-api-rate-limiter"
+new_sqlite_classes = ["ApiRateLimiter"]
+
+[[ratelimits]]
+name = "CHAT_RATE_LIMITER"
+namespace_id = "2026101001"
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+[[ratelimits]]
+name = "SEARCH_RATE_LIMITER"
+namespace_id = "2026101002"
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+[[ratelimits]]
+name = "HISTORY_RATE_LIMITER"
+namespace_id = "2026101003"
+  [ratelimits.simple]
+  limit = 60
+  period = 60
