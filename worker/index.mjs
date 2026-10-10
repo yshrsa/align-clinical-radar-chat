@@ -37,7 +37,7 @@ async function evidenceCounts(env) {
   return { documents: Number(row?.documents || 0), searchable: Number(row?.searchable || 0) };
 }
 
-async function searchCorpus(env, query, limit = 8) {
+export async function searchCorpus(env, query, limit = 8) {
   const terms = searchTerms(query);
   let articles;
   try {
