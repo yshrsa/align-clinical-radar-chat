@@ -14,7 +14,7 @@
 </head>
 <body>
 <aside><div class="brand"><span>Align</span> Clinical Radar</div><button class="new" id="new">＋ 新規チャット</button><div id="threads"></div></aside>
-<main><div class="top"><strong>Clinical Operations Chat</strong><div class="topnav"><a href="https://yshrsa.github.io/align-clinical-radar-news/">News</a><a class="active" aria-current="page" href="./">AI Chat</a><span class="status" id="status">接続確認中</span></div></div><div class="chat" id="chat"><div class="msg assistant">クリアアライナー文献コーパスに基づいて回答します。製品名、治療工程、評価指標、試験名などを含めて質問してください。</div></div><form id="form"><input id="question" maxlength="2000" placeholder="例：Invisalignのplanned-vs-achieved評価で主要な結果は？" autocomplete="off"><button>送信</button></form><div class="hint">Qwen 3.8 27B / 無料枠到達時は検索専用に安全縮退 / 回答は医療助言ではありません</div></main>
+<main><div class="top"><strong>Clinical Operations Chat</strong><div class="topnav"><a href="https://yshrsa.github.io/align-clinical-radar-news/">Evidence</a><a href="https://yshrsa.github.io/align-clinical-radar-news/industry.html">Industry News</a><a class="active" aria-current="page" href="./">AI Chat</a><span class="status" id="status">接続確認中</span></div></div><div class="chat" id="chat"><div class="msg assistant">クリアアライナー文献コーパスに基づいて回答します。製品名、治療工程、評価指標、試験名などを含めて質問してください。</div></div><form id="form"><input id="question" maxlength="2000" placeholder="例：Invisalignのplanned-vs-achieved評価で主要な結果は？" autocomplete="off"><button>送信</button></form><div class="hint">Qwen 3.8 27B / 無料枠到達時は検索専用に安全縮退 / 回答は医療助言ではありません</div></main>
 <script>
 const API='';let threadId=null;
 const headers={'content-type':'application/json'};const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
