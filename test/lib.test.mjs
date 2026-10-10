@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { allowedOrigin, buildGroundedPrompt, buildNewsSummaryPrompt, buildSummaryPrompt, gatewayAuthorized, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, ownerId, scoreArticle, searchTerms } from '../worker/lib.mjs';
+import { allowedOrigin, buildGroundedPrompt, buildNewsSummaryPrompt, buildSummaryPrompt, gatewayAuthorized, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, normalizeIndustryNewsDocument, ownerId, scoreArticle, searchTerms } from '../worker/lib.mjs';
 
 test('searchTerms extracts English and Japanese terms', () => {
   assert.deepEqual(searchTerms('Invisalign の refinement 結果'), ['invisalign', 'refinement', '結果']);
@@ -40,6 +40,19 @@ test('news summary prompt is source-grounded and flags promotional evidence', ()
   assert.match(prompt, /推測、外部知識、数値の補完は禁止/);
   assert.match(prompt, /広告・プレスリリース・ホワイトペーパー/);
   assert.match(prompt, /Company announced a feature/);
+});
+
+test('industry news normalization preserves source, timestamps and archive metadata', () => {
+  const article = normalizeIndustryNewsDocument({
+    article_id: 'a1', title: 'Launch', url: 'https://example.test/a1', source_name: 'Publisher',
+    source_categories: ['Aligners'], summary_ja: '要約', key_takeaway_ja: '要点',
+    first_seen_at_utc: '2026-10-09T00:00:00Z', last_seen_at_utc: '2026-10-10T00:00:00Z', article_sha256: 'abc'
+  });
+  assert.equal(article.source_name, 'Publisher');
+  assert.equal(article.source_categories_json, '["Aligners"]');
+  assert.equal(article.summary_status, 'complete');
+  assert.equal(article.first_seen_at_utc, '2026-10-09T00:00:00Z');
+  assert.equal(article.last_seen_at_utc, '2026-10-10T00:00:00Z');
 });
 
 test('D1 evidence mapping restores arrays and bilingual summaries', () => {

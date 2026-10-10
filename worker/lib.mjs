@@ -156,6 +156,45 @@ export function normalizeEvidenceDocument(document) {
   };
 }
 
+export function normalizeIndustryNewsDocument(document) {
+  const text = key => String(document?.[key] || '').trim();
+  const list = key => Array.isArray(document?.[key]) ? document[key].map(value => String(value)).filter(Boolean) : [];
+  const articleId = text('article_id');
+  const title = text('title');
+  const url = text('url');
+  const articleSha256 = text('article_sha256');
+  const seenAt = text('last_seen_at_utc');
+  if (!articleId || !title || !url || !articleSha256 || !seenAt) {
+    throw new Error('article_id, title, url, article_sha256 and last_seen_at_utc are required');
+  }
+  return {
+    article_id: articleId,
+    title,
+    url,
+    published_date: text('published_date'),
+    source_id: text('source_id'),
+    source_name: text('source_name'),
+    source_url: text('source_url'),
+    feed_url: text('feed_url'),
+    source_category: text('source_category'),
+    source_categories_json: JSON.stringify(list('source_categories')),
+    snippet_en: text('snippet_en'),
+    summary_ja: text('summary_ja'),
+    key_takeaway_ja: text('key_takeaway_ja'),
+    assets_json: JSON.stringify(list('assets')),
+    companies_json: JSON.stringify(list('companies')),
+    topics_json: JSON.stringify(list('topics')),
+    focal_related: document?.focal_related ? 1 : 0,
+    japan_relevant: document?.japan_relevant ? 1 : 0,
+    summary_model: text('summary_model'),
+    summary_generated_at_utc: text('summary_generated_at_utc'),
+    summary_status: text('summary_ja') && text('key_takeaway_ja') ? 'complete' : 'pending',
+    first_seen_at_utc: text('first_seen_at_utc') || seenAt,
+    last_seen_at_utc: seenAt,
+    article_sha256: articleSha256
+  };
+}
+
 export function searchTerms(query) {
   return [...new Set(String(query || '').toLowerCase().match(/[a-z0-9][a-z0-9._-]{2,}|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]{2,}/gu) || [])].slice(0, 6);
 }

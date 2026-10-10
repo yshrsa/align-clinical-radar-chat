@@ -1,4 +1,4 @@
-import { MODEL, RESERVE_NEURONS_PER_CHAT, RESERVE_NEURONS_PER_NEWS_SUMMARY, RESERVE_NEURONS_PER_SUMMARY, allowedOrigin, buildGroundedPrompt, buildNewsSummaryPrompt, buildSummaryPrompt, corsHeaders, gatewayAuthorized, jsonResponse, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, ownerId, scoreArticle, searchTerms } from './lib.mjs';
+import { MODEL, RESERVE_NEURONS_PER_CHAT, RESERVE_NEURONS_PER_NEWS_SUMMARY, RESERVE_NEURONS_PER_SUMMARY, allowedOrigin, buildGroundedPrompt, buildNewsSummaryPrompt, buildSummaryPrompt, corsHeaders, gatewayAuthorized, jsonResponse, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, normalizeIndustryNewsDocument, ownerId, scoreArticle, searchTerms } from './lib.mjs';
 
 const NOTION_QUERY_URL = databaseId => `https://api.notion.com/v1/databases/${databaseId}/query`;
 
@@ -35,6 +35,13 @@ async function evidenceCounts(env) {
     "SELECT COUNT(*) AS documents, SUM(CASE WHEN summary_status='complete' THEN 1 ELSE 0 END) AS searchable FROM evidence_documents"
   ).first();
   return { documents: Number(row?.documents || 0), searchable: Number(row?.searchable || 0) };
+}
+
+async function industryNewsCounts(env) {
+  const row = await env.CHAT_DB.prepare(
+    "SELECT COUNT(*) AS documents, SUM(CASE WHEN summary_status='complete' THEN 1 ELSE 0 END) AS summarized FROM industry_news"
+  ).first();
+  return { documents: Number(row?.documents || 0), summarized: Number(row?.summarized || 0) };
 }
 
 export async function searchCorpus(env, query, limit = 8) {
@@ -126,6 +133,64 @@ async function syncEvidence(env, body) {
   return { mode, received: normalized.length, upserted: results.reduce((sum, result) => sum + Number(result.meta?.changes || 0), 0), synced_at_utc: now };
 }
 
+async function industryNewsState(env) {
+  const [documents, state] = await Promise.all([
+    env.CHAT_DB.prepare('SELECT article_id,article_sha256 FROM industry_news').all(),
+    env.CHAT_DB.prepare("SELECT * FROM industry_news_sync_state WHERE source='github-industry-news'").first()
+  ]);
+  return {
+    hashes: Object.fromEntries((documents.results || []).map(row => [String(row.article_id), String(row.article_sha256)])),
+    state: state || null
+  };
+}
+
+async function syncIndustryNews(env, body) {
+  const documents = Array.isArray(body?.documents) ? body.documents : [];
+  if (documents.length > 25) throw new Error('A sync batch may contain at most 25 documents');
+  const normalized = documents.map(normalizeIndustryNewsDocument);
+  const now = new Date().toISOString();
+  const sql = `INSERT INTO industry_news(
+    article_id,title,url,published_date,source_id,source_name,source_url,feed_url,source_category,source_categories_json,
+    snippet_en,summary_ja,key_takeaway_ja,assets_json,companies_json,topics_json,focal_related,japan_relevant,
+    summary_model,summary_generated_at_utc,summary_status,first_seen_at_utc,last_seen_at_utc,article_sha256,synced_at_utc
+  ) VALUES(${Array(25).fill('?').join(',')}) ON CONFLICT(article_id) DO UPDATE SET
+    title=excluded.title,url=excluded.url,published_date=excluded.published_date,source_id=excluded.source_id,
+    source_name=excluded.source_name,source_url=excluded.source_url,feed_url=excluded.feed_url,
+    source_category=excluded.source_category,source_categories_json=excluded.source_categories_json,
+    snippet_en=excluded.snippet_en,summary_ja=excluded.summary_ja,key_takeaway_ja=excluded.key_takeaway_ja,
+    assets_json=excluded.assets_json,companies_json=excluded.companies_json,topics_json=excluded.topics_json,
+    focal_related=excluded.focal_related,japan_relevant=excluded.japan_relevant,summary_model=excluded.summary_model,
+    summary_generated_at_utc=excluded.summary_generated_at_utc,summary_status=excluded.summary_status,
+    last_seen_at_utc=CASE WHEN excluded.last_seen_at_utc>industry_news.last_seen_at_utc THEN excluded.last_seen_at_utc ELSE industry_news.last_seen_at_utc END,
+    article_sha256=excluded.article_sha256,synced_at_utc=excluded.synced_at_utc
+    WHERE industry_news.article_sha256<>excluded.article_sha256 OR excluded.last_seen_at_utc>industry_news.last_seen_at_utc`;
+  const statements = normalized.map(document => env.CHAT_DB.prepare(sql).bind(
+    document.article_id, document.title, document.url, document.published_date, document.source_id, document.source_name,
+    document.source_url, document.feed_url, document.source_category, document.source_categories_json, document.snippet_en,
+    document.summary_ja, document.key_takeaway_ja, document.assets_json, document.companies_json, document.topics_json,
+    document.focal_related, document.japan_relevant, document.summary_model, document.summary_generated_at_utc,
+    document.summary_status, document.first_seen_at_utc, document.last_seen_at_utc, document.article_sha256, now
+  ));
+  const results = statements.length ? await env.CHAT_DB.batch(statements) : [];
+  const mode = body?.mode === 'full' ? 'full' : 'delta';
+  const countRow = await env.CHAT_DB.prepare('SELECT COUNT(*) AS count FROM industry_news').first();
+  await env.CHAT_DB.prepare(
+    `INSERT INTO industry_news_sync_state(source,source_generated_at_utc,source_document_count,archived_document_count,last_full_sync_at_utc,last_delta_sync_at_utc,updated_at_utc)
+     VALUES('github-industry-news',?,?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET
+     source_generated_at_utc=excluded.source_generated_at_utc,source_document_count=excluded.source_document_count,
+     archived_document_count=excluded.archived_document_count,
+     last_full_sync_at_utc=COALESCE(excluded.last_full_sync_at_utc,industry_news_sync_state.last_full_sync_at_utc),
+     last_delta_sync_at_utc=excluded.last_delta_sync_at_utc,updated_at_utc=excluded.updated_at_utc`
+  ).bind(String(body?.source_generated_at_utc || ''), Number(body?.source_document_count || 0), Number(countRow?.count || 0), mode === 'full' ? now : null, now, now).run();
+  return {
+    mode,
+    received: normalized.length,
+    upserted: results.reduce((sum, result) => sum + Number(result.meta?.changes || 0), 0),
+    archived_documents: Number(countRow?.count || 0),
+    synced_at_utc: now
+  };
+}
+
 async function reserveBudget(env, kind) {
   const date = new Date().toISOString().slice(0, 10);
   const now = new Date().toISOString();
@@ -209,13 +274,16 @@ async function route(request, env) {
   }
   if (url.pathname === '/health') {
     let counts = null;
+    let industryNews = null;
     try { counts = await evidenceCounts(env); } catch (error) { console.warn('Evidence health unavailable', error); }
+    try { industryNews = await industryNewsCounts(env); } catch (error) { console.warn('Industry news health unavailable', error); }
     return jsonResponse({
       status: 'ok', model: MODEL, paid_fallback: false,
       ingest_configured: Boolean(env.INGEST_SECRET), access_gateway: Boolean(env.PAGE_GATEWAY_SECRET),
       rate_limited: Boolean(env.API_RATE_LIMITER || env.CHAT_RATE_LIMITER),
       corpus_source: counts?.searchable ? 'd1-evidence' : (env.NOTION_API_KEY && env.NOTION_DATABASE_ID ? 'notion' : 'validated-public-feed'),
-      evidence: counts
+      evidence: counts,
+      industry_news: industryNews
     }, 200, request);
   }
   if (url.pathname === '/api/admin/evidence/state' && request.method === 'GET') {
@@ -225,6 +293,14 @@ async function route(request, env) {
   if (url.pathname === '/api/admin/evidence/sync' && request.method === 'POST') {
     if (!ingestAuthorized(request, env)) return jsonResponse({ error: 'Unauthorized' }, 401, request);
     return jsonResponse(await syncEvidence(env, await request.json()), 200, request);
+  }
+  if (url.pathname === '/api/admin/industry-news/state' && request.method === 'GET') {
+    if (!ingestAuthorized(request, env)) return jsonResponse({ error: 'Unauthorized' }, 401, request);
+    return jsonResponse(await industryNewsState(env), 200, request);
+  }
+  if (url.pathname === '/api/admin/industry-news/sync' && request.method === 'POST') {
+    if (!ingestAuthorized(request, env)) return jsonResponse({ error: 'Unauthorized' }, 401, request);
+    return jsonResponse(await syncIndustryNews(env, await request.json()), 200, request);
   }
   const browserApi = url.pathname === '/api/chat' || url.pathname === '/api/search' || url.pathname === '/api/threads' || url.pathname.startsWith('/api/threads/');
   if (browserApi && !gatewayAuthorized(request, env)) {
