@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { allowedOrigin, buildGroundedPrompt, buildSummaryPrompt, gatewayAuthorized, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, ownerId, scoreArticle, searchTerms } from '../worker/lib.mjs';
+import { allowedOrigin, buildGroundedPrompt, buildNewsSummaryPrompt, buildSummaryPrompt, gatewayAuthorized, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, ownerId, scoreArticle, searchTerms } from '../worker/lib.mjs';
 
 test('searchTerms extracts English and Japanese terms', () => {
   assert.deepEqual(searchTerms('Invisalign の refinement 結果'), ['invisalign', 'refinement', '結果']);
@@ -33,6 +33,13 @@ test('summary prompt requires the exact missing-information sentinel', () => {
   assert.match(prompt, /抄録に記載なし/);
   assert.match(prompt, /補完・換算・推定を禁止/);
   assert.match(prompt, /N=100/);
+});
+
+test('news summary prompt is source-grounded and flags promotional evidence', () => {
+  const prompt = buildNewsSummaryPrompt({ source_name: 'Official newsroom', title: 'Launch', snippet_en: 'Company announced a feature.' });
+  assert.match(prompt, /推測、外部知識、数値の補完は禁止/);
+  assert.match(prompt, /広告・プレスリリース・ホワイトペーパー/);
+  assert.match(prompt, /Company announced a feature/);
 });
 
 test('D1 evidence mapping restores arrays and bilingual summaries', () => {

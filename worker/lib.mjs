@@ -1,6 +1,7 @@
 export const MODEL = '@cf/qwen/qwen3.8-27b';
 export const RESERVE_NEURONS_PER_CHAT = 600;
 export const RESERVE_NEURONS_PER_SUMMARY = 500;
+export const RESERVE_NEURONS_PER_NEWS_SUMMARY = 250;
 
 const PRODUCTION_ORIGIN = 'https://align-clinical-radar-chat.pages.dev';
 
@@ -191,4 +192,14 @@ export function buildSummaryPrompt(article) {
     `フィールド: summary_ja, key_takeaway_ja, why_matters_ja, study_type_ja, endpoints_ja, endpoint_results_ja, sample_size_ja\n\n` +
     `Title: ${article.title || ''}\nJournal: ${article.journal || ''}\n` +
     `Publication Type: ${(article.publication_types || []).join(', ')}\nAbstract: ${article.abstract || '[no abstract available]'}`;
+}
+
+export function buildNewsSummaryPrompt(article) {
+  return `あなたは歯科・医療機器業界ニュースの編集者です。\n` +
+    `以下の配信元タイトルと抜粋だけを根拠に、JSONオブジェクトだけを返してください。\n` +
+    `推測、外部知識、数値の補完は禁止です。広告・プレスリリース・ホワイトペーパーの場合は断定的な臨床事実として扱わず、その性質が分かる表現にしてください。\n` +
+    `summary_jaは自然な日本語で2文以内、key_takeaway_jaはClinical Operations・治療計画・業務運用への要点を1文で記載してください。\n` +
+    `根拠がない場合は「配信元抜粋に記載なし」としてください。\n` +
+    `フィールド: summary_ja, key_takeaway_ja\n\n` +
+    `Source: ${article.source_name || ''}\nTitle: ${article.title || ''}\nExcerpt: ${article.snippet_en || '[no excerpt provided]'}`;
 }

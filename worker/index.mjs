@@ -1,4 +1,4 @@
-import { MODEL, RESERVE_NEURONS_PER_CHAT, RESERVE_NEURONS_PER_SUMMARY, allowedOrigin, buildGroundedPrompt, buildSummaryPrompt, corsHeaders, gatewayAuthorized, jsonResponse, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, ownerId, scoreArticle, searchTerms } from './lib.mjs';
+import { MODEL, RESERVE_NEURONS_PER_CHAT, RESERVE_NEURONS_PER_NEWS_SUMMARY, RESERVE_NEURONS_PER_SUMMARY, allowedOrigin, buildGroundedPrompt, buildNewsSummaryPrompt, buildSummaryPrompt, corsHeaders, gatewayAuthorized, jsonResponse, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, ownerId, scoreArticle, searchTerms } from './lib.mjs';
 
 const NOTION_QUERY_URL = databaseId => `https://api.notion.com/v1/databases/${databaseId}/query`;
 
@@ -129,8 +129,8 @@ async function syncEvidence(env, body) {
 async function reserveBudget(env, kind) {
   const date = new Date().toISOString().slice(0, 10);
   const now = new Date().toISOString();
-  const isSummary = kind === 'summary';
-  const amount = isSummary ? RESERVE_NEURONS_PER_SUMMARY : RESERVE_NEURONS_PER_CHAT;
+  const isSummary = kind !== 'chat';
+  const amount = kind === 'news-summary' ? RESERVE_NEURONS_PER_NEWS_SUMMARY : (isSummary ? RESERVE_NEURONS_PER_SUMMARY : RESERVE_NEURONS_PER_CHAT);
   const limit = Number(isSummary ? (env.SUMMARY_DAILY_NEURON_BUDGET || 4000) : (env.CHAT_DAILY_NEURON_BUDGET || 6000));
   const column = isSummary ? 'summary_reserved_neurons' : 'chat_reserved_neurons';
   const calls = isSummary ? 'summary_calls' : 'chat_calls';
@@ -278,6 +278,40 @@ async function route(request, env) {
     } catch (error) {
       await env.CHAT_DB.prepare("UPDATE ai_requests SET state='failed',updated_at=? WHERE request_key=?")
         .bind(new Date().toISOString(), requestKey).run();
+      throw error;
+    }
+  }
+  if (url.pathname === '/api/admin/summarize-news' && request.method === 'POST') {
+    if (!ingestAuthorized(request, env)) return jsonResponse({ error: 'Unauthorized' }, 401, request);
+    const requestKey = String(request.headers.get('idempotency-key') || '').slice(0, 200);
+    if (!requestKey) return jsonResponse({ error: 'Idempotency-Key is required' }, 400, request);
+    const existing = await env.CHAT_DB.prepare('SELECT state,response_json FROM ai_requests WHERE request_key=?').bind(requestKey).first();
+    if (existing?.state === 'completed' && existing.response_json) return jsonResponse(JSON.parse(existing.response_json), 200, request);
+    if (existing?.state === 'processing') return jsonResponse({ error: 'Request is already processing' }, 409, request);
+    if (existing?.state === 'failed') return jsonResponse({ error: 'Request failed; it will be retried in the next UTC day' }, 409, request);
+    const now = new Date().toISOString();
+    await env.CHAT_DB.prepare('INSERT INTO ai_requests(request_key,kind,date_utc,state,created_at,updated_at) VALUES(?,?,?,?,?,?)')
+      .bind(requestKey, 'news-summary', now.slice(0, 10), 'processing', now, now).run();
+    if (!(await reserveBudget(env, 'news-summary'))) {
+      await env.CHAT_DB.prepare("UPDATE ai_requests SET state='failed',updated_at=? WHERE request_key=?").bind(new Date().toISOString(), requestKey).run();
+      return jsonResponse({ error: 'Daily free summary budget exhausted', budget_exhausted: true }, 429, request);
+    }
+    const article = await request.json();
+    try {
+      const result = await env.AI.run(MODEL, {
+        messages: [
+          { role: 'system', content: 'Return valid JSON only. Do not use markdown.' },
+          { role: 'user', content: buildNewsSummaryPrompt(article) }
+        ],
+        response_format: { type: 'json_object' }, reasoning_effort: 'low', temperature: 0.1, max_completion_tokens: 650
+      });
+      const payload = { response: result.response || result.choices?.[0]?.message?.content || '', usage: result.usage || null, model: MODEL };
+      if (!payload.response) throw new Error('Qwen returned no final response after reasoning');
+      await env.CHAT_DB.prepare("UPDATE ai_requests SET state='completed',response_json=?,updated_at=? WHERE request_key=?")
+        .bind(JSON.stringify(payload), new Date().toISOString(), requestKey).run();
+      return jsonResponse(payload, 200, request);
+    } catch (error) {
+      await env.CHAT_DB.prepare("UPDATE ai_requests SET state='failed',updated_at=? WHERE request_key=?").bind(new Date().toISOString(), requestKey).run();
       throw error;
     }
   }
