@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { allowedOrigin, buildGroundedPrompt, buildSummaryPrompt, gatewayAuthorized, mapNotionPage, ownerId, scoreArticle, searchTerms } from '../worker/lib.mjs';
+import { allowedOrigin, buildGroundedPrompt, buildSummaryPrompt, gatewayAuthorized, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, ownerId, scoreArticle, searchTerms } from '../worker/lib.mjs';
 
 test('searchTerms extracts English and Japanese terms', () => {
   assert.deepEqual(searchTerms('Invisalign の refinement 結果'), ['invisalign', 'refinement', '結果']);
@@ -33,6 +33,22 @@ test('summary prompt requires the exact missing-information sentinel', () => {
   assert.match(prompt, /抄録に記載なし/);
   assert.match(prompt, /補完・換算・推定を禁止/);
   assert.match(prompt, /N=100/);
+});
+
+test('D1 evidence mapping restores arrays and bilingual summaries', () => {
+  const article = mapD1EvidenceRow({ pmid: '1', title: 'Trial', abstract_en: 'English abstract', summary_ja: '日本語要約', authors_json: '["A"]', assets_json: '["invisalign"]', focal_related: 1 });
+  assert.equal(article.summary_en, 'English abstract');
+  assert.deepEqual(article.authors, ['A']);
+  assert.deepEqual(article.assets, ['invisalign']);
+  assert.equal(article.focal_related, true);
+});
+
+test('evidence normalization marks only seven-field summaries complete', () => {
+  const complete = normalizeEvidenceDocument({ pmid: '1', title: 'Trial', evidence_sha256: 'hash', abstract_en: 'A', summary_ja: 's', key_takeaway_ja: 'k', why_matters_ja: 'w', study_type_ja: 'd', endpoints_ja: 'e', endpoint_results_ja: 'r', sample_size_ja: 'n' });
+  const pending = normalizeEvidenceDocument({ pmid: '2', title: 'Pending', evidence_sha256: 'hash' });
+  assert.equal(complete.summary_status, 'complete');
+  assert.equal(complete.summary_en, 'A');
+  assert.equal(pending.summary_status, 'pending');
 });
 
 test('CORS accepts only the production Pages origin and preview deployments', () => {

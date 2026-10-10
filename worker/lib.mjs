@@ -75,6 +75,86 @@ export function mapNotionPage(page) {
   };
 }
 
+function parseJsonArray(value) {
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function mapD1EvidenceRow(row) {
+  return {
+    pmid: String(row.pmid || ''),
+    title: String(row.title || ''),
+    abstract_en: String(row.abstract_en || ''),
+    summary_en: String(row.summary_en || row.abstract_en || ''),
+    summary_ja: String(row.summary_ja || ''),
+    key_takeaway_ja: String(row.key_takeaway_ja || ''),
+    why_matters_ja: String(row.why_matters_ja || ''),
+    study_type_ja: String(row.study_type_ja || ''),
+    endpoints_ja: String(row.endpoints_ja || ''),
+    endpoint_results_ja: String(row.endpoint_results_ja || ''),
+    sample_size_ja: String(row.sample_size_ja || ''),
+    journal: String(row.journal || ''),
+    authors: parseJsonArray(row.authors_json),
+    publication_date: String(row.publication_date || ''),
+    doi: String(row.doi || ''),
+    url: String(row.url || ''),
+    publication_types: parseJsonArray(row.publication_types_json),
+    mesh_terms: parseJsonArray(row.mesh_terms_json),
+    assets: parseJsonArray(row.assets_json),
+    companies: parseJsonArray(row.companies_json),
+    topics: parseJsonArray(row.topics_json),
+    focal_related: Boolean(row.focal_related),
+    japan_relevant: Boolean(row.japan_relevant),
+    summary_status: String(row.summary_status || 'pending')
+  };
+}
+
+export function normalizeEvidenceDocument(document) {
+  const text = key => String(document?.[key] || '').trim();
+  const list = key => Array.isArray(document?.[key]) ? document[key].map(value => String(value)).filter(Boolean) : [];
+  const pmid = text('pmid');
+  const title = text('title');
+  const evidenceSha256 = text('evidence_sha256');
+  if (!pmid || !title || !evidenceSha256) throw new Error('pmid, title and evidence_sha256 are required');
+  const summaryFields = ['summary_ja', 'key_takeaway_ja', 'why_matters_ja', 'study_type_ja', 'endpoints_ja', 'endpoint_results_ja', 'sample_size_ja'];
+  const complete = summaryFields.every(key => text(key));
+  return {
+    pmid, title,
+    abstract_en: text('abstract_en'),
+    summary_en: text('summary_en') || text('abstract_en'),
+    summary_ja: text('summary_ja'),
+    key_takeaway_ja: text('key_takeaway_ja'),
+    why_matters_ja: text('why_matters_ja'),
+    study_type_ja: text('study_type_ja'),
+    endpoints_ja: text('endpoints_ja'),
+    endpoint_results_ja: text('endpoint_results_ja'),
+    sample_size_ja: text('sample_size_ja'),
+    journal: text('journal'),
+    authors_json: JSON.stringify(list('authors')),
+    publication_date: text('publication_date'),
+    doi: text('doi'),
+    url: text('url'),
+    publication_types_json: JSON.stringify(list('publication_types')),
+    mesh_terms_json: JSON.stringify(list('mesh_terms')),
+    assets_json: JSON.stringify(list('assets')),
+    companies_json: JSON.stringify(list('companies')),
+    topics_json: JSON.stringify(list('topics')),
+    focal_related: document?.focal_related ? 1 : 0,
+    japan_relevant: document?.japan_relevant ? 1 : 0,
+    source_content_sha256: text('source_content_sha256'),
+    evidence_sha256: evidenceSha256,
+    fetched_at_utc: text('fetched_at_utc'),
+    source_updated_at_utc: text('source_updated_at_utc'),
+    summary_model: text('summary_model'),
+    summary_generated_at_utc: text('summary_generated_at_utc'),
+    summary_status: complete ? 'complete' : 'pending'
+  };
+}
+
 export function searchTerms(query) {
   return [...new Set(String(query || '').toLowerCase().match(/[a-z0-9][a-z0-9._-]{2,}|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]{2,}/gu) || [])].slice(0, 6);
 }

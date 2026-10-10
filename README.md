@@ -5,8 +5,8 @@
 
 クリアアライナー治療とClinical / Treatment Planning Operations領域の公開文献を検索し、
 Cloudflare Workers AI上のQwen 3.8 27Bが根拠番号付きで回答する独立クラウドポータルです。
-Notionが未設定または一時障害でも、品質ゲート通過済みのGitHub Pages JSONへ自動的に
-切り替わるため、検索とチャットが停止しません。
+D1の文献テーブルを通常の検索元にし、D1が未初期化または一時障害でも、Notion（任意）、
+品質ゲート通過済みのGitHub Pages JSONの順に自動退避するため、検索とチャットが停止しません。
 
 AI ChatはStructural Heart RadarおよびBI Evidence Radarと同様にCloudflare Accessで保護します。
 ブラウザはPages Functionの同一Origin APIだけを呼び、Pages FunctionがAccess認証済みメールを
@@ -25,8 +25,12 @@ Workerへ安全に引き渡します。Workerのチャット・検索・履歴AP
 
 - `frontend/`: Cloudflare Accessで保護するCloudflare Pages用UI
 - `functions/`: Access認証をWorkerへ引き渡す同一Origin Gateway
-- `worker/`: 公開フィード検索、根拠付きQwen回答、D1履歴API、分単位レート制限
-- `migrations/`: スレッド・メッセージ・日次AI予算
+- `worker/`: D1文献検索、公開フィード退避、根拠付きQwen回答、D1履歴API、分単位レート制限
+- `migrations/`: 文献・同期状態、スレッド・メッセージ・日次AI予算
+
+文献テーブルにはPubMedメタデータ、Publication Type、MeSH、製品・企業・テーマ分類、
+英語抄録（英語要約）、7項目の日本語要約、同期ハッシュを保存します。初回は全件、以後は
+同期ハッシュが変化した文献だけを毎日06:15 JSTのNewsワークフローから追加・更新します。
 
 ## 必要な秘密情報
 

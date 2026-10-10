@@ -1,4 +1,4 @@
-import { MODEL, RESERVE_NEURONS_PER_CHAT, RESERVE_NEURONS_PER_SUMMARY, allowedOrigin, buildGroundedPrompt, buildSummaryPrompt, corsHeaders, gatewayAuthorized, jsonResponse, mapNotionPage, ownerId, scoreArticle, searchTerms } from './lib.mjs';
+import { MODEL, RESERVE_NEURONS_PER_CHAT, RESERVE_NEURONS_PER_SUMMARY, allowedOrigin, buildGroundedPrompt, buildSummaryPrompt, corsHeaders, gatewayAuthorized, jsonResponse, mapD1EvidenceRow, mapNotionPage, normalizeEvidenceDocument, ownerId, scoreArticle, searchTerms } from './lib.mjs';
 
 const NOTION_QUERY_URL = databaseId => `https://api.notion.com/v1/databases/${databaseId}/query`;
 
@@ -23,10 +23,30 @@ async function publicFeed(env) {
   return payload.items || [];
 }
 
+async function d1Evidence(env) {
+  const result = await env.CHAT_DB.prepare(
+    "SELECT * FROM evidence_documents WHERE summary_status='complete' ORDER BY publication_date DESC LIMIT 500"
+  ).all();
+  return (result.results || []).map(mapD1EvidenceRow);
+}
+
+async function evidenceCounts(env) {
+  const row = await env.CHAT_DB.prepare(
+    "SELECT COUNT(*) AS documents, SUM(CASE WHEN summary_status='complete' THEN 1 ELSE 0 END) AS searchable FROM evidence_documents"
+  ).first();
+  return { documents: Number(row?.documents || 0), searchable: Number(row?.searchable || 0) };
+}
+
 async function searchCorpus(env, query, limit = 8) {
   const terms = searchTerms(query);
   let articles;
-  if (env.NOTION_API_KEY && env.NOTION_DATABASE_ID) {
+  try {
+    articles = await d1Evidence(env);
+    if (!articles.length) throw new Error('D1 evidence table is empty');
+  } catch (error) {
+    console.warn('D1 evidence unavailable; trying secondary corpus', error);
+  }
+  if (!articles && env.NOTION_API_KEY && env.NOTION_DATABASE_ID) {
     const filters = terms.slice(0, 3).flatMap(term => [
       { property: 'Title', title: { contains: term } },
       { property: 'Summary JA', rich_text: { contains: term } },
@@ -39,7 +59,7 @@ async function searchCorpus(env, query, limit = 8) {
       console.warn('Notion unavailable; using validated public feed', error);
       articles = await publicFeed(env);
     }
-  } else {
+  } else if (!articles) {
     articles = await publicFeed(env);
   }
   return articles
@@ -47,6 +67,63 @@ async function searchCorpus(env, query, limit = 8) {
     .filter(item => !terms.length || item.score >= 1)
     .sort((a, b) => b.score - a.score || String(b.article.publication_date).localeCompare(String(a.article.publication_date)))
     .slice(0, limit).map(item => item.article);
+}
+
+function ingestAuthorized(request, env) {
+  const expected = String(env.INGEST_SECRET || '');
+  const supplied = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  return Boolean(expected && supplied && expected === supplied);
+}
+
+async function evidenceState(env) {
+  const [documents, state] = await Promise.all([
+    env.CHAT_DB.prepare('SELECT pmid,evidence_sha256 FROM evidence_documents').all(),
+    env.CHAT_DB.prepare("SELECT * FROM evidence_sync_state WHERE source='github-corpus'").first()
+  ]);
+  return {
+    hashes: Object.fromEntries((documents.results || []).map(row => [String(row.pmid), String(row.evidence_sha256)])),
+    state: state || null
+  };
+}
+
+async function syncEvidence(env, body) {
+  const documents = Array.isArray(body?.documents) ? body.documents : [];
+  if (documents.length > 25) throw new Error('A sync batch may contain at most 25 documents');
+  const normalized = documents.map(normalizeEvidenceDocument);
+  const now = new Date().toISOString();
+  const sql = `INSERT INTO evidence_documents(
+    pmid,title,abstract_en,summary_en,summary_ja,key_takeaway_ja,why_matters_ja,study_type_ja,endpoints_ja,endpoint_results_ja,sample_size_ja,
+    journal,authors_json,publication_date,doi,url,publication_types_json,mesh_terms_json,assets_json,companies_json,topics_json,
+    focal_related,japan_relevant,source_content_sha256,evidence_sha256,fetched_at_utc,source_updated_at_utc,summary_model,summary_generated_at_utc,summary_status,synced_at_utc
+  ) VALUES(${Array(31).fill('?').join(',')}) ON CONFLICT(pmid) DO UPDATE SET
+    title=excluded.title,abstract_en=excluded.abstract_en,summary_en=excluded.summary_en,summary_ja=excluded.summary_ja,
+    key_takeaway_ja=excluded.key_takeaway_ja,why_matters_ja=excluded.why_matters_ja,study_type_ja=excluded.study_type_ja,
+    endpoints_ja=excluded.endpoints_ja,endpoint_results_ja=excluded.endpoint_results_ja,sample_size_ja=excluded.sample_size_ja,
+    journal=excluded.journal,authors_json=excluded.authors_json,publication_date=excluded.publication_date,doi=excluded.doi,url=excluded.url,
+    publication_types_json=excluded.publication_types_json,mesh_terms_json=excluded.mesh_terms_json,assets_json=excluded.assets_json,
+    companies_json=excluded.companies_json,topics_json=excluded.topics_json,focal_related=excluded.focal_related,japan_relevant=excluded.japan_relevant,
+    source_content_sha256=excluded.source_content_sha256,evidence_sha256=excluded.evidence_sha256,fetched_at_utc=excluded.fetched_at_utc,
+    source_updated_at_utc=excluded.source_updated_at_utc,summary_model=excluded.summary_model,
+    summary_generated_at_utc=excluded.summary_generated_at_utc,summary_status=excluded.summary_status,synced_at_utc=excluded.synced_at_utc
+    WHERE evidence_documents.evidence_sha256<>excluded.evidence_sha256`;
+  const statements = normalized.map(document => env.CHAT_DB.prepare(sql).bind(
+    document.pmid, document.title, document.abstract_en, document.summary_en, document.summary_ja, document.key_takeaway_ja,
+    document.why_matters_ja, document.study_type_ja, document.endpoints_ja, document.endpoint_results_ja, document.sample_size_ja,
+    document.journal, document.authors_json, document.publication_date, document.doi, document.url, document.publication_types_json,
+    document.mesh_terms_json, document.assets_json, document.companies_json, document.topics_json, document.focal_related,
+    document.japan_relevant, document.source_content_sha256, document.evidence_sha256, document.fetched_at_utc,
+    document.source_updated_at_utc, document.summary_model, document.summary_generated_at_utc, document.summary_status, now
+  ));
+  const results = statements.length ? await env.CHAT_DB.batch(statements) : [];
+  const mode = body?.mode === 'full' ? 'full' : 'delta';
+  await env.CHAT_DB.prepare(
+    `INSERT INTO evidence_sync_state(source,source_generated_at_utc,document_count,last_full_sync_at_utc,last_delta_sync_at_utc,updated_at_utc)
+     VALUES('github-corpus',?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET
+     source_generated_at_utc=excluded.source_generated_at_utc,document_count=excluded.document_count,
+     last_full_sync_at_utc=COALESCE(excluded.last_full_sync_at_utc,evidence_sync_state.last_full_sync_at_utc),
+     last_delta_sync_at_utc=excluded.last_delta_sync_at_utc,updated_at_utc=excluded.updated_at_utc`
+  ).bind(String(body?.source_generated_at_utc || ''), Number(body?.source_document_count || 0), mode === 'full' ? now : null, now, now).run();
+  return { mode, received: normalized.length, upserted: results.reduce((sum, result) => sum + Number(result.meta?.changes || 0), 0), synced_at_utc: now };
 }
 
 async function reserveBudget(env, kind) {
@@ -130,12 +207,25 @@ async function route(request, env) {
     if (!allowedOrigin(request)) return new Response(null, { status: 403 });
     return new Response(null, { status: 204, headers: corsHeaders(request) });
   }
-  if (url.pathname === '/health') return jsonResponse({
-    status: 'ok', model: MODEL, paid_fallback: false,
-    ingest_configured: Boolean(env.INGEST_SECRET), access_gateway: Boolean(env.PAGE_GATEWAY_SECRET),
-    rate_limited: Boolean(env.API_RATE_LIMITER || env.CHAT_RATE_LIMITER),
-    corpus_source: env.NOTION_API_KEY && env.NOTION_DATABASE_ID ? 'notion' : 'validated-public-feed'
-  }, 200, request);
+  if (url.pathname === '/health') {
+    let counts = null;
+    try { counts = await evidenceCounts(env); } catch (error) { console.warn('Evidence health unavailable', error); }
+    return jsonResponse({
+      status: 'ok', model: MODEL, paid_fallback: false,
+      ingest_configured: Boolean(env.INGEST_SECRET), access_gateway: Boolean(env.PAGE_GATEWAY_SECRET),
+      rate_limited: Boolean(env.API_RATE_LIMITER || env.CHAT_RATE_LIMITER),
+      corpus_source: counts?.searchable ? 'd1-evidence' : (env.NOTION_API_KEY && env.NOTION_DATABASE_ID ? 'notion' : 'validated-public-feed'),
+      evidence: counts
+    }, 200, request);
+  }
+  if (url.pathname === '/api/admin/evidence/state' && request.method === 'GET') {
+    if (!ingestAuthorized(request, env)) return jsonResponse({ error: 'Unauthorized' }, 401, request);
+    return jsonResponse(await evidenceState(env), 200, request);
+  }
+  if (url.pathname === '/api/admin/evidence/sync' && request.method === 'POST') {
+    if (!ingestAuthorized(request, env)) return jsonResponse({ error: 'Unauthorized' }, 401, request);
+    return jsonResponse(await syncEvidence(env, await request.json()), 200, request);
+  }
   const browserApi = url.pathname === '/api/chat' || url.pathname === '/api/search' || url.pathname === '/api/threads' || url.pathname.startsWith('/api/threads/');
   if (browserApi && !gatewayAuthorized(request, env)) {
     return jsonResponse({ error: 'Cloudflare Access authentication is required' }, 401, request);
@@ -148,9 +238,7 @@ async function route(request, env) {
     return jsonResponse({ query, count: articles.length, articles }, 200, request);
   }
   if (url.pathname === '/api/admin/summarize' && request.method === 'POST') {
-    const expected = String(env.INGEST_SECRET || '');
-    const supplied = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
-    if (!expected || supplied !== expected) return jsonResponse({ error: 'Unauthorized' }, 401, request);
+    if (!ingestAuthorized(request, env)) return jsonResponse({ error: 'Unauthorized' }, 401, request);
     const requestKey = String(request.headers.get('idempotency-key') || '').slice(0, 200);
     if (!requestKey) return jsonResponse({ error: 'Idempotency-Key is required' }, 400, request);
     const existing = await env.CHAT_DB.prepare('SELECT state,response_json FROM ai_requests WHERE request_key=?').bind(requestKey).first();
