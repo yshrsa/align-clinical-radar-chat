@@ -172,6 +172,7 @@ export function normalizeIndustryNewsDocument(document) {
     title,
     url,
     published_date: text('published_date'),
+    published_at_utc: text('published_at_utc'),
     source_id: text('source_id'),
     source_name: text('source_name'),
     source_url: text('source_url'),

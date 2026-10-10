@@ -150,11 +150,11 @@ async function syncIndustryNews(env, body) {
   const normalized = documents.map(normalizeIndustryNewsDocument);
   const now = new Date().toISOString();
   const sql = `INSERT INTO industry_news(
-    article_id,title,url,published_date,source_id,source_name,source_url,feed_url,source_category,source_categories_json,
+    article_id,title,url,published_date,published_at_utc,source_id,source_name,source_url,feed_url,source_category,source_categories_json,
     snippet_en,summary_ja,key_takeaway_ja,assets_json,companies_json,topics_json,focal_related,japan_relevant,
     summary_model,summary_generated_at_utc,summary_status,first_seen_at_utc,last_seen_at_utc,article_sha256,synced_at_utc
-  ) VALUES(${Array(25).fill('?').join(',')}) ON CONFLICT(article_id) DO UPDATE SET
-    title=excluded.title,url=excluded.url,published_date=excluded.published_date,source_id=excluded.source_id,
+  ) VALUES(${Array(26).fill('?').join(',')}) ON CONFLICT(article_id) DO UPDATE SET
+    title=excluded.title,url=excluded.url,published_date=excluded.published_date,published_at_utc=excluded.published_at_utc,source_id=excluded.source_id,
     source_name=excluded.source_name,source_url=excluded.source_url,feed_url=excluded.feed_url,
     source_category=excluded.source_category,source_categories_json=excluded.source_categories_json,
     snippet_en=excluded.snippet_en,summary_ja=excluded.summary_ja,key_takeaway_ja=excluded.key_takeaway_ja,
@@ -165,7 +165,7 @@ async function syncIndustryNews(env, body) {
     article_sha256=excluded.article_sha256,synced_at_utc=excluded.synced_at_utc
     WHERE industry_news.article_sha256<>excluded.article_sha256 OR excluded.last_seen_at_utc>industry_news.last_seen_at_utc`;
   const statements = normalized.map(document => env.CHAT_DB.prepare(sql).bind(
-    document.article_id, document.title, document.url, document.published_date, document.source_id, document.source_name,
+    document.article_id, document.title, document.url, document.published_date, document.published_at_utc, document.source_id, document.source_name,
     document.source_url, document.feed_url, document.source_category, document.source_categories_json, document.snippet_en,
     document.summary_ja, document.key_takeaway_ja, document.assets_json, document.companies_json, document.topics_json,
     document.focal_related, document.japan_relevant, document.summary_model, document.summary_generated_at_utc,

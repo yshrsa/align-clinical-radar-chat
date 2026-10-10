@@ -44,11 +44,12 @@ test('news summary prompt is source-grounded and flags promotional evidence', ()
 
 test('industry news normalization preserves source, timestamps and archive metadata', () => {
   const article = normalizeIndustryNewsDocument({
-    article_id: 'a1', title: 'Launch', url: 'https://example.test/a1', source_name: 'Publisher',
+    article_id: 'a1', title: 'Launch', url: 'https://example.test/a1', published_at_utc: '2026-10-10T01:02:03Z', source_name: 'Publisher',
     source_categories: ['Aligners'], summary_ja: '要約', key_takeaway_ja: '要点',
     first_seen_at_utc: '2026-10-09T00:00:00Z', last_seen_at_utc: '2026-10-10T00:00:00Z', article_sha256: 'abc'
   });
   assert.equal(article.source_name, 'Publisher');
+  assert.equal(article.published_at_utc, '2026-10-10T01:02:03Z');
   assert.equal(article.source_categories_json, '["Aligners"]');
   assert.equal(article.summary_status, 'complete');
   assert.equal(article.first_seen_at_utc, '2026-10-09T00:00:00Z');
